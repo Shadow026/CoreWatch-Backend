@@ -80,7 +80,11 @@ router.get('/estado', async (req, res) => {
         e.equipo_id,
         e.nombre,
         e.ip,
-        e.activo,
+        CASE
+          WHEN m.timestamp IS NULL THEN false
+          WHEN m.timestamp < NOW() - INTERVAL '2 hours' THEN false
+          ELSE true
+        END AS activo,
         e.ultimo_visto,
 
         m.cpu_pct,
@@ -134,7 +138,11 @@ router.get('/equipos', async (req, res) => {
         e.equipo_id,
         e.nombre,
         e.ip,
-        e.activo,
+        CASE
+          WHEN m.timestamp IS NULL THEN false
+          WHEN m.timestamp < NOW() - INTERVAL '2 hours' THEN false
+          ELSE true
+        END AS activo,
         e.os,
         e.os_version,
         e.ultimo_visto,
@@ -344,7 +352,11 @@ router.get('/reportes/salud', async (req, res) => {
         e.equipo_id,
         e.nombre,
         e.ip,
-        e.activo,
+        CASE
+          WHEN m.timestamp IS NULL THEN false
+          WHEN m.timestamp < NOW() - INTERVAL '2 hours' THEN false
+          ELSE true
+        END AS activo,
         e.ultimo_visto,
 
         m.cpu_pct,
