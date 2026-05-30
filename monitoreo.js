@@ -690,4 +690,35 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// ======================================================
+// MARCAR TODAS LAS ALERTAS COMO RESUELTAS
+// ======================================================
+
+router.put('/alertas/limpiar', async (req, res) => {
+  try {
+    const query = `
+      UPDATE alertas
+      SET resuelta = true
+      WHERE resuelta = false
+      RETURNING *;
+    `;
+
+    const result = await pool.query(query);
+
+    res.json({
+      success: true,
+      mensaje: 'Alertas limpiadas correctamente',
+      total_actualizadas: result.rowCount
+    });
+
+  } catch (error) {
+    console.error('Error limpiando alertas:', error);
+
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;
