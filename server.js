@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
+console.log('Gemini configurado:', !!process.env.GEMINI_API_KEY);
 
 const monitoreoRoutes = require('./monitoreo');
 const pool = require('./database');

@@ -733,4 +733,273 @@ router.put('/alertas/limpiar', async (req, res) => {
   }
 });
 
+// ======================================================
+// IA LOCAL - DIAGNÓSTICO DE EQUIPO
+// ======================================================
+
+router.post('/ia/diagnostico/:equipoId', async (req, res) => {
+  try {
+    const { equipoId } = req.params;
+
+    const equipoQuery = `
+      SELECT
+        e.equipo_id,
+        e.nombre,
+        e.ip,
+        e.os,
+        e.os_version,
+        e.ultimo_visto,
+
+        CASE
+          WHEN m.timestamp IS NULL THEN false
+          WHEN m.timestamp < NOW() - INTERVAL '2 hours' THEN false
+          ELSE true
+        END AS activo,
+
+        m.timestamp AS ultima_metrica,
+        m.cpu_pct,
+        m.ram_pct,
+        m.disco_pct,
+        m.temp_cpu,
+        m.ram_usada_mb,
+        m.ram_total_mb,
+        m.disco_usado_gb,
+        m.disco_total_gb,
+        m.uptime_horas,
+        m.total_procesos
+
+      FROM equipos e
+
+      LEFT JOIN LATERAL (
+        SELECT *
+        FROM metricas
+        WHERE TRIM(LOWER(metricas.equipo_id)) =
+              TRIM(LOWER(e.equipo_id))
+        ORDER BY timestamp DESC
+        LIMIT 1
+      ) m ON true
+
+      WHERE TRIM(LOWER(e.equipo_id)) =
+            TRIM(LOWER($1))
+
+      LIMIT 1;
+    `;
+
+    const equipoResult = await pool.query(equipoQuery, [equipoId]);
+
+    if (equipoResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Equipo no encontrado'
+      });
+    }
+
+    const equipo = equipoResult.rows[0];
+
+    const alertasQuery = `
+      SELECT
+        tipo,
+        severidad,
+        descripcion,
+        valor_actual,
+        valor_umbral,
+        timestamp,
+        resuelta
+      FROM alertas
+      WHERE TRIM(LOWER(equipo_id)) =
+            TRIM(LOWER($1))
+      ORDER BY timestamp DESC
+      LIMIT 10;
+    `;
+
+    const alertasResult = await pool.query(alertasQuery, [equipoId]);
+
+    let procesos = [];
+
+    try {
+      const procesosQuery = `
+        SELECT
+          nombre,
+          pid,
+          cpu_pct,
+          ram_mb,
+          es_sospechoso,
+          timestamp
+        FROM procesos
+        WHERE TRIM(LOWER(equipo_id)) =
+              TRIM(LOWER($1))
+        ORDER BY timestamp DESC, cpu_pct DESC
+        LIMIT 10;
+      `;
+
+      const procesosResult = await pool.query(procesosQuery, [equipoId]);
+      procesos = procesosResult.rows;
+
+    } catch (errorProcesos) {
+      procesos = [];
+    }
+
+    const cpu = Number(equipo.cpu_pct || 0);
+    const ram = Number(equipo.ram_pct || 0);
+    const disco = Number(equipo.disco_pct || 0);
+    const temp = Number(equipo.temp_cpu || 0);
+
+    const diagnostico = [];
+    const causas = [];
+    const acciones = [];
+    const componentes_riesgo = [];
+
+    let puntajeRiesgo = 0;
+    let estado = 'SALUDABLE';
+
+    if (!equipo.activo) {
+      estado = 'INACTIVO';
+      puntajeRiesgo += 30;
+      diagnostico.push('El equipo no ha enviado métricas recientes en las últimas 2 horas.');
+      causas.push('El agente de monitoreo podría estar detenido, la computadora apagada o sin conexión.');
+      acciones.push('Verificar si el equipo está encendido y conectado a la red.');
+      acciones.push('Revisar que el script/agente de la Raspberry o del equipo siga enviando datos.');
+      componentes_riesgo.push('Conectividad / agente de monitoreo');
+    }
+
+    if (cpu >= 90) {
+      estado = 'CRITICO';
+      puntajeRiesgo += 30;
+      diagnostico.push(`CPU crítica: ${cpu.toFixed(1)}%.`);
+      causas.push('Procesos con alto consumo, servicios bloqueados o carga excesiva.');
+      acciones.push('Revisar procesos con mayor uso de CPU y cerrar o reiniciar los que estén saturando el sistema.');
+      componentes_riesgo.push('Procesador');
+    } else if (cpu >= 80) {
+      if (estado !== 'CRITICO') estado = 'ADVERTENCIA';
+      puntajeRiesgo += 15;
+      diagnostico.push(`CPU elevada: ${cpu.toFixed(1)}%.`);
+      causas.push('Carga alta temporal o procesos exigentes en ejecución.');
+      acciones.push('Monitorear procesos activos y verificar si el consumo se mantiene elevado.');
+      componentes_riesgo.push('Procesador');
+    }
+
+    if (ram >= 90) {
+      estado = 'CRITICO';
+      puntajeRiesgo += 25;
+      diagnostico.push(`RAM crítica: ${ram.toFixed(1)}%.`);
+      causas.push('Memoria casi agotada, demasiadas aplicaciones abiertas o fuga de memoria.');
+      acciones.push('Cerrar procesos innecesarios o reiniciar servicios con alto consumo de memoria.');
+      acciones.push('Evaluar ampliación de memoria RAM si el problema es frecuente.');
+      componentes_riesgo.push('Memoria RAM');
+    } else if (ram >= 85) {
+      if (estado !== 'CRITICO') estado = 'ADVERTENCIA';
+      puntajeRiesgo += 12;
+      diagnostico.push(`RAM elevada: ${ram.toFixed(1)}%.`);
+      causas.push('Uso alto de aplicaciones o servicios en segundo plano.');
+      acciones.push('Revisar aplicaciones con mayor consumo de RAM.');
+      componentes_riesgo.push('Memoria RAM');
+    }
+
+    if (disco >= 95) {
+      estado = 'CRITICO';
+      puntajeRiesgo += 25;
+      diagnostico.push(`Disco crítico: ${disco.toFixed(1)}%.`);
+      causas.push('Poco espacio libre en disco, acumulación de archivos temporales o logs.');
+      acciones.push('Liberar espacio eliminando archivos temporales, descargas antiguas o logs innecesarios.');
+      acciones.push('Mover respaldos o archivos pesados a otro almacenamiento.');
+      componentes_riesgo.push('Almacenamiento');
+    } else if (disco >= 90) {
+      if (estado !== 'CRITICO') estado = 'ADVERTENCIA';
+      puntajeRiesgo += 12;
+      diagnostico.push(`Disco elevado: ${disco.toFixed(1)}%.`);
+      causas.push('El almacenamiento está cerca de saturarse.');
+      acciones.push('Programar limpieza de disco antes de que llegue a estado crítico.');
+      componentes_riesgo.push('Almacenamiento');
+    }
+
+    if (temp >= 85) {
+      estado = 'CRITICO';
+      puntajeRiesgo += 30;
+      diagnostico.push(`Temperatura crítica: ${temp.toFixed(1)}°C.`);
+      causas.push('Posible mala ventilación, polvo, ventiladores fallando o pasta térmica deteriorada.');
+      acciones.push('Revisar ventiladores, limpiar polvo y verificar flujo de aire.');
+      acciones.push('Evitar cargas pesadas hasta reducir la temperatura.');
+      componentes_riesgo.push('Sistema de refrigeración / CPU');
+    } else if (temp >= 75) {
+      if (estado !== 'CRITICO') estado = 'ADVERTENCIA';
+      puntajeRiesgo += 15;
+      diagnostico.push(`Temperatura elevada: ${temp.toFixed(1)}°C.`);
+      causas.push('El equipo está trabajando con temperatura superior a lo recomendado.');
+      acciones.push('Verificar ventilación y ubicación física del equipo.');
+      componentes_riesgo.push('Sistema de refrigeración');
+    }
+
+    const alertasActivas = alertasResult.rows.filter(a => !a.resuelta);
+
+    if (alertasActivas.length > 0) {
+      puntajeRiesgo += Math.min(alertasActivas.length * 5, 20);
+      diagnostico.push(`El equipo tiene ${alertasActivas.length} alerta(s) activa(s).`);
+      causas.push('Existen eventos recientes no resueltos relacionados con el equipo.');
+      acciones.push('Revisar el centro de alertas y atender primero las alertas críticas.');
+    }
+
+    const procesosSospechosos = procesos.filter(p => p.es_sospechoso);
+
+    if (procesosSospechosos.length > 0) {
+      puntajeRiesgo += 20;
+      estado = 'CRITICO';
+      diagnostico.push(`Se detectaron ${procesosSospechosos.length} proceso(s) sospechoso(s).`);
+      causas.push('Puede existir software no autorizado o procesos anómalos ejecutándose.');
+      acciones.push('Revisar procesos sospechosos y validar si pertenecen a software legítimo.');
+      componentes_riesgo.push('Seguridad / procesos');
+    }
+
+    if (diagnostico.length === 0) {
+      diagnostico.push('El equipo se encuentra dentro de parámetros normales.');
+      causas.push('Las métricas actuales están por debajo de los umbrales de advertencia.');
+      acciones.push('Mantener monitoreo normal y realizar mantenimiento preventivo periódico.');
+    }
+
+    let nivel_urgencia = 'BAJO';
+
+    if (puntajeRiesgo >= 70) {
+      nivel_urgencia = 'CRITICO';
+    } else if (puntajeRiesgo >= 45) {
+      nivel_urgencia = 'ALTO';
+    } else if (puntajeRiesgo >= 20) {
+      nivel_urgencia = 'MEDIO';
+    }
+
+    const componentesUnicos = [...new Set(componentes_riesgo)];
+
+    res.json({
+      success: true,
+      equipo_id: equipo.equipo_id,
+      equipo_nombre: equipo.nombre,
+      estado,
+      nivel_urgencia,
+      puntaje_riesgo: Math.min(puntajeRiesgo, 100),
+      resumen: `El equipo ${equipo.nombre} se encuentra en estado ${estado.toLowerCase()} con nivel de urgencia ${nivel_urgencia.toLowerCase()}.`,
+      diagnostico,
+      posibles_causas: [...new Set(causas)],
+      acciones_recomendadas: [...new Set(acciones)],
+      componentes_en_riesgo: componentesUnicos.length > 0 ? componentesUnicos : ['Ninguno detectado'],
+      datos_analizados: {
+        cpu_pct: cpu,
+        ram_pct: ram,
+        disco_pct: disco,
+        temp_cpu: temp,
+        activo: equipo.activo,
+        ultima_metrica: equipo.ultima_metrica,
+        alertas_activas: alertasActivas.length,
+        procesos_sospechosos: procesosSospechosos.length
+      }
+    });
+
+  } catch (error) {
+    console.error('Error IA local:', error);
+
+    res.status(500).json({
+      success: false,
+      error: 'No se pudo generar el diagnóstico local',
+      detalle: error.message
+    });
+  }
+}); 
+
 module.exports = router;
