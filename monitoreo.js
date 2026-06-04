@@ -339,26 +339,19 @@ router.get('/equipos/:id', async (req, res) => {
 
 router.get('/reportes/salud', async (req, res) => {
   try {
-    const resumenQuery = `
-      SELECT
-        COUNT(*) AS total_equipos,
-        COUNT(*) FILTER (WHERE activo = true) AS equipos_activos,
-        COUNT(*) FILTER (WHERE activo = false) AS equipos_inactivos
-      FROM equipos;
-    `;
-
     const equiposQuery = `
       SELECT
         e.equipo_id,
         e.nombre,
         e.ip,
+
         CASE
           WHEN m.timestamp IS NULL THEN false
           WHEN m.timestamp < NOW() - INTERVAL '2 hours' THEN false
           ELSE true
         END AS activo,
-        e.ultimo_visto,
 
+        e.ultimo_visto,
         m.cpu_pct,
         m.ram_pct,
         m.disco_pct,
@@ -379,10 +372,14 @@ router.get('/reportes/salud', async (req, res) => {
       ORDER BY e.nombre ASC;
     `;
 
-    const resumen = await pool.query(resumenQuery);
     const equipos = await pool.query(equiposQuery);
-
     const listaEquipos = equipos.rows;
+
+    const total = listaEquipos.length;
+
+    const activos = listaEquipos.filter(e => e.activo).length;
+
+    const inactivos = listaEquipos.filter(e => !e.activo).length;
 
     const saludables = listaEquipos.filter(e =>
       e.activo &&
@@ -404,9 +401,9 @@ router.get('/reportes/salud', async (req, res) => {
 
     res.json({
       resumen: {
-        total_equipos: parseInt(resumen.rows[0].total_equipos) || 0,
-        equipos_activos: parseInt(resumen.rows[0].equipos_activos) || 0,
-        equipos_inactivos: parseInt(resumen.rows[0].equipos_inactivos) || 0,
+        total_equipos: total,
+        equipos_activos: activos,
+        equipos_inactivos: inactivos,
         saludables,
         advertencia
       },
